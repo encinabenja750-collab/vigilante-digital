@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from "react";
 
-// Definición de las pantallas del flujo
 const STEPS = {
   REGISTER: "REGISTER",
   VERIFY: "VERIFY",
@@ -18,8 +17,9 @@ function App() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [shieldActive, setShieldActive] = useState(true);
+  const [historyList, setHistoryList] = useState([]); // Guarda el historial de SQLite
 
-  // Verificamos si el usuario ya se registró anteriormente al abrir la extensión
+  // Escucha el inicio de la extensión en Chrome
   useEffect(() => {
     if (
       typeof chrome !== "undefined" &&
@@ -31,11 +31,10 @@ function App() {
         (result) => {
           if (result.userEmail) {
             setEmail(result.userEmail);
-
             if (result.isVerified) {
-              setStep(STEPS.LOCK); // Si ya terminó todo, pide PIN diario
+              setStep(STEPS.LOCK);
             } else if (result.currentStep === STEPS.VERIFY) {
-              setStep(STEPS.VERIFY); // ¡AQUÍ ESTÁ LA MAGIA!: Si cerró en la pantalla del código, vuelve ahí
+              setStep(STEPS.VERIFY);
             }
           }
         },
@@ -43,17 +42,34 @@ function App() {
     }
   }, []);
 
-  // ✉️ 1. MANEJADOR DE REGISTRO
+  // Consulta el historial en la base de datos relacional
+  const cargarHistorial = async () => {
+    try {
+      const res = await fetch("http://localhost:5000/api/history");
+      if (res.ok) {
+        const data = await res.json();
+        setHistoryList(data);
+      }
+    } catch (err) {
+      console.error("Error cargando historial de BD:", err);
+    }
+  };
+
+  // Trae los datos dinámicos cuando entramos al panel
+  useEffect(() => {
+    if (step === STEPS.DASHBOARD) {
+      cargarHistorial();
+    }
+  }, [step]);
+
+  // ✉️ MANEJADOR DE REGISTRO
   const handleRegister = async (e) => {
     e.preventDefault();
     setError("");
-
-    if (!email.includes("@"))
-      return setError("Introduce un correo electrónico válido.");
+    if (!email.includes("@")) return setError("Introduce un correo válido.");
     if (pin.length !== 4 || isNaN(pin))
-      return setError("El PIN debe ser exactamente de 4 números.");
-    if (pin !== confirmPin)
-      return setError("Los PINes ingresados no coinciden.");
+      return setError("PIN debe ser de 4 números.");
+    if (pin !== confirmPin) return setError("Los PINes no coinciden.");
 
     setLoading(true);
     try {
@@ -62,9 +78,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, pin }),
       });
-
       if (response.ok) {
-        // TRUCO: Guardamos en Chrome que ya enviamos el correo y estamos esperando el código
         if (
           typeof chrome !== "undefined" &&
           chrome.storage &&
@@ -78,22 +92,21 @@ function App() {
         setStep(STEPS.VERIFY);
       } else {
         const data = await response.json();
-        setError(data.error || "Error al procesar el registro.");
+        setError(data.error || "Error en el registro.");
       }
     } catch (err) {
-      setError("No se pudo conectar con el servidor de seguridad.");
+      setError("Error conectando con el servidor.");
     } finally {
       setLoading(false);
     }
   };
 
-  // 🔑 2. MANEJADOR DE VERIFICACIÓN OTP
+  // 🔑 MANEJADOR DE VERIFICACIÓN OTP
   const handleVerify = async (e) => {
     e.preventDefault();
     setError("");
-
     if (otpCode.length !== 6 || isNaN(otpCode))
-      return setError("El código debe ser de 6 números.");
+      return setError("Debe ser de 6 números.");
 
     setLoading(true);
     try {
@@ -102,9 +115,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, code: otpCode }),
       });
-
       if (response.ok) {
-        // Guardamos de forma definitiva que el usuario ya está verificado y activo
         if (
           typeof chrome !== "undefined" &&
           chrome.storage &&
@@ -119,29 +130,47 @@ function App() {
         setStep(STEPS.DASHBOARD);
       } else {
         const data = await response.json();
-        setError(data.error || "Código incorrecto o vencido.");
+        setError(data.error || "Código incorrecto.");
       }
     } catch (err) {
-      setError("Error de conexión al validar el código.");
+      setError("Error al validar código.");
     } finally {
       setLoading(false);
     }
   };
 
-  // 🔒 3. MANEJADOR DE LOGIN POR PIN DIARIO
+  // 🔒 MANEJADOR DE LOGIN POR PIN DIARIO
   const handleLoginPin = (num) => {
     setError(false);
     if (loginPin.length < 4) {
       const nuevoPin = loginPin + num;
       setLoginPin(nuevoPin);
-
       if (nuevoPin.length === 4) {
         setTimeout(() => {
-          // Desbloqueo rápido para la demo del MVP de la hackathon
           setStep(STEPS.DASHBOARD);
           setLoginPin("");
         }, 200);
       }
+    }
+  };
+
+  // 🚪 FUNCIÓN PARA CERRAR SESIÓN (LIMPIEZA DE MEMORIA REAL)
+  const handleLogout = () => {
+    if (
+      typeof chrome !== "undefined" &&
+      chrome.storage &&
+      chrome.storage.local
+    ) {
+      chrome.storage.local.clear(() => {
+        setEmail("");
+        setPin("");
+        setConfirmPin("");
+        setOtpCode("");
+        setLoginPin("");
+        setStep(STEPS.REGISTER);
+      });
+    } else {
+      setStep(STEPS.REGISTER);
     }
   };
 
@@ -152,9 +181,7 @@ function App() {
     return (
       <div style={containerStyle}>
         <h2 style={titleStyle}>🛡️ Registro de Escudo</h2>
-        <p style={subtitleStyle}>
-          Crea tu cuenta de ciberseguridad para activar el Vigilante AI.
-        </p>
+        <p style={subtitleStyle}>Activa el Vigilante AI en tu navegador.</p>
         <form onSubmit={handleRegister} style={formStyle}>
           <input
             type="email"
@@ -167,7 +194,7 @@ function App() {
           <input
             type="password"
             maxLength={4}
-            placeholder="Crea tu PIN (4 dígitos)"
+            placeholder="PIN de 4 dígitos"
             value={pin}
             onChange={(e) => setPin(e.target.value)}
             required
@@ -184,41 +211,43 @@ function App() {
           />
           {error && <p style={errorStyle}>{error}</p>}
           <button type="submit" disabled={loading} style={btnStyle}>
-            {loading ? "Enviando código..." : "Registrar y Enviar Código"}
+            {loading ? "Procesando..." : "Registrar Cuenta"}
           </button>
         </form>
       </div>
     );
   }
 
-  // VISTA B: PANTALLA DE VERIFICACIÓN DE GMAIL (OTP)
+  // VISTA B: PANTALLA DE VERIFICACIÓN DE GMAIL (OTP) -> ¡BOTÓN VOLVER ATRÁS INCLUIDO!
   if (step === STEPS.VERIFY) {
     return (
       <div style={containerStyle}>
-        <div style={{ fontSize: "32px" }}>✉️</div>
+        <div style={{ fontSize: "24px" }}>✉️</div>
         <h2 style={titleStyle}>Verifica tu Correo</h2>
         <p style={subtitleStyle}>
-          Te enviamos un código de 6 dígitos a <strong>{email}</strong> a través
-          de Resend.
+          Ingresa el código de tu terminal de Node para <strong>{email}</strong>
+          .
         </p>
         <form onSubmit={handleVerify} style={formStyle}>
           <input
             type="text"
             maxLength={6}
-            placeholder="Código de 6 dígitos"
+            placeholder="000000"
             value={otpCode}
             onChange={(e) => setOtpCode(e.target.value)}
             required
-            style={{
-              ...inputStyle,
-              letterSpacing: "4px",
-              textAlign: "center",
-              fontSize: "18px",
-            }}
+            style={{ ...inputStyle, letterSpacing: "4px", textAlign: "center" }}
           />
           {error && <p style={errorStyle}>{error}</p>}
           <button type="submit" disabled={loading} style={btnStyle}>
-            {loading ? "Validando..." : "Activar Extensión"}
+            {loading ? "Verificando..." : "Confirmar Activación"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setStep(STEPS.REGISTER)}
+            style={btnBackStyle}
+          >
+            ⬅️ Volver y cambiar correo
           </button>
         </form>
       </div>
@@ -229,29 +258,26 @@ function App() {
   if (step === STEPS.LOCK) {
     return (
       <div style={containerStyle}>
-        <div style={{ fontSize: "32px", marginBottom: "5px" }}>🔒</div>
+        <div style={{ fontSize: "24px" }}>🔒</div>
         <h2 style={titleStyle}>Sistema Bloqueado</h2>
-        <p style={subtitleStyle}>
-          Ingresa tu PIN de privacidad para acceder al panel de control.
-        </p>
+        <p style={subtitleStyle}>Coloca tu PIN para entrar al panel.</p>
         <div
           style={{
             display: "flex",
             justifyContent: "center",
-            gap: "12px",
-            marginBottom: "20px",
+            gap: "8px",
+            marginBottom: "15px",
           }}
         >
           {Array.from({ length: 4 }).map((_, i) => (
             <div
               key={i}
               style={{
-                width: "12px",
-                height: "12px",
+                width: "10px",
+                height: "10px",
                 borderRadius: "50%",
                 border: "2px solid #38bdf8",
                 background: loginPin.length > i ? "#38bdf8" : "transparent",
-                transition: "all 0.1s",
               }}
             />
           ))}
@@ -260,39 +286,48 @@ function App() {
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(3, 1fr)",
-            gap: "10px",
-            maxWidth: "180px",
-            margin: "0 auto",
+            gap: "8px",
+            maxWidth: "160px",
+            margin: "0 auto 10px auto",
           }}
         >
           {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((n) => (
             <button
               key={n}
               onClick={() => handleLoginPin(n)}
-              style={keyboardBtnStyle}
+              style={numBtnStyle}
             >
               {n}
             </button>
           ))}
           <button
             onClick={() => setLoginPin("")}
-            style={{
-              ...keyboardBtnStyle,
-              fontSize: "11px",
-              background: "#334155",
-            }}
+            style={{ ...numBtnStyle, fontSize: "10px", background: "#334155" }}
           >
             Borrar
           </button>
-          <button onClick={() => handleLoginPin("0")} style={keyboardBtnStyle}>
+          <button onClick={() => handleLoginPin("0")} style={numBtnStyle}>
             0
           </button>
         </div>
+        <button
+          onClick={handleLogout}
+          style={{
+            background: "transparent",
+            border: "none",
+            color: "#64748b",
+            cursor: "pointer",
+            fontSize: "11px",
+            textDecoration: "underline",
+          }}
+        >
+          Restablecer desde cero
+        </button>
       </div>
     );
   }
 
-  // VISTA D: DASHBOARD PRINCIPAL PROTEGIDO
+  // VISTA D: DASHBOARD PRINCIPAL CON HISTORIAL DINÁMICO DE SQLITE
   return (
     <div style={containerStyle}>
       <div
@@ -300,10 +335,10 @@ function App() {
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-          marginBottom: "15px",
+          marginBottom: "10px",
         }}
       >
-        <h3 style={{ margin: 0, fontSize: "15px" }}>🛡️ Vigilante Forense AI</h3>
+        <h3 style={{ margin: 0, fontSize: "13px" }}>🛡️ Vigilante Forense AI</h3>
         <button
           onClick={() => setStep(STEPS.LOCK)}
           style={{
@@ -311,20 +346,19 @@ function App() {
             border: "none",
             color: "#94a3b8",
             cursor: "pointer",
-            fontSize: "11px",
-            textDecoration: "underline",
+            fontSize: "10px",
           }}
         >
-          Cerrar Panel
+          Bloquear
         </button>
       </div>
 
       <div
         style={{
-          padding: "12px",
-          borderRadius: "8px",
+          padding: "8px",
+          borderRadius: "6px",
           textAlign: "center",
-          marginBottom: "15px",
+          marginBottom: "10px",
           background: shieldActive
             ? "rgba(16, 185, 129, 0.1)"
             : "rgba(239, 68, 68, 0.1)",
@@ -333,21 +367,24 @@ function App() {
       >
         <strong
           style={{
-            fontSize: "12px",
+            fontSize: "11px",
             color: shieldActive ? "#10b981" : "#ef4444",
           }}
         >
-          {shieldActive ? "🟢 ESCUDO ACTIVO EN VIVO" : "🔴 ANÁLISIS SUSPENDIDO"}
+          {shieldActive ? "🟢 ESCUDO ACTIVO EN VIVO" : "🔴 ESCANEO PAUSADO"}
         </strong>
       </div>
 
+      {/* RENDERIZADO DEL HISTORIAL DE AMENAZAS */}
       <div
         style={{
           background: "#1e293b",
-          padding: "12px",
+          padding: "10px",
           borderRadius: "8px",
-          marginBottom: "15px",
+          marginBottom: "12px",
           textAlign: "left",
+          maxHeight: "180px",
+          overflowY: "auto",
         }}
       >
         <span
@@ -356,128 +393,168 @@ function App() {
             color: "#64748b",
             textTransform: "uppercase",
             fontWeight: "bold",
+            display: "block",
+            marginBottom: "6px",
           }}
         >
-          Métricas de Privacidad
+          🛡️ Historial de Amenazas (BD)
         </span>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            marginTop: "6px",
-            fontSize: "12px",
-          }}
-        >
-          <span>Auditorías de DOM en vivo:</span>
-          <span style={{ fontWeight: "bold", color: "#38bdf8" }}>Activo</span>
-        </div>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            marginTop: "4px",
-            fontSize: "12px",
-          }}
-        >
-          <span>Filtro Heurístico Local:</span>
-          <span style={{ fontWeight: "bold", color: "#10b981" }}>Óptimo</span>
-        </div>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            marginTop: "4px",
-            fontSize: "12px",
-          }}
-        >
-          <span>Persistencia Relacional:</span>
-          <span style={{ fontWeight: "bold", color: "#a855f7" }}>SQLite</span>
-        </div>
+
+        {historyList.length === 0 ? (
+          <p
+            style={{
+              fontSize: "11px",
+              color: "#94a3b8",
+              margin: "5px 0 0 0",
+              textAlign: "center",
+            }}
+          >
+            Ninguna amenaza detectada hoy. ¡Sitio seguro!
+          </p>
+        ) : (
+          historyList.map((item) => (
+            <div
+              key={item.id}
+              style={{
+                borderBottom: "1px solid #334155",
+                paddingBottom: "6px",
+                marginBottom: "6px",
+                fontSize: "11px",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  fontWeight: "bold",
+                  color: "#f87171",
+                }}
+              >
+                <span>⚠️ {item.threat_type}</span>
+                <span style={{ fontSize: "9px", color: "#64748b" }}>
+                  {item.action}
+                </span>
+              </div>
+              <div
+                style={{
+                  color: "#cbd5e1",
+                  fontSize: "10px",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  margin: "2px 0",
+                }}
+              >
+                <strong>URL:</strong> {item.url}
+              </div>
+              <div
+                style={{
+                  color: "#94a3b8",
+                  fontSize: "10px",
+                  background: "#0f172a",
+                  padding: "4px",
+                  borderRadius: "4px",
+                  marginTop: "2px",
+                }}
+              >
+                <strong>Razón:</strong> {item.reason}
+              </div>
+            </div>
+          ))
+        )}
       </div>
 
       <button
         onClick={() => setShieldActive(!shieldActive)}
         style={{
           width: "100%",
-          padding: "10px",
+          padding: "8px",
           borderRadius: "6px",
           border: "none",
           fontWeight: "bold",
           color: "#fff",
           cursor: "pointer",
           background: shieldActive ? "#ef4444" : "#10b981",
+          marginBottom: "8px",
+          fontSize: "12px",
         }}
       >
-        {shieldActive
-          ? "Pausar Escaneo Proactivo"
-          : "Reanudar Escaneo Proactivo"}
+        {shieldActive ? "Pausar Escudo" : "Activar Escudo"}
+      </button>
+
+      <button onClick={handleLogout} style={btnLogoutStyle}>
+        🚪 Cerrar Sesión (Limpiar Cuenta)
       </button>
     </div>
   );
 }
 
-// ==================== OBJETOS DE ESTILO INLINE PARA EL MVP ====================
+// ==================== OBJETOS DE ESTILO CONSERVA EL TAMAÑO COMPACTO INICIAL ====================
 const containerStyle = {
   width: "280px",
-  padding: "20px",
-  fontFamily: "system-ui, -apple-system, sans-serif",
+  padding: "15px",
+  fontFamily: "system-ui, sans-serif",
   background: "#0f172a",
   color: "#ffffff",
-  borderRadius: "12px",
+  borderRadius: "8px",
   boxSizing: "border-box",
-  textAlign: "center",
 };
-const titleStyle = {
-  margin: "5px 0",
-  fontSize: "16px",
-  fontWeight: "bold",
-  letterSpacing: "-0.3px",
-};
+const titleStyle = { margin: "2px 0", fontSize: "14px", fontWeight: "bold" };
 const subtitleStyle = {
-  fontSize: "11px",
+  fontSize: "10px",
   color: "#94a3b8",
-  margin: "0 0 15px 0",
-  lineHeight: "1.4",
+  margin: "0 0 10px 0",
 };
-const formStyle = { display: "flex", flexDirection: "column", gap: "10px" };
+const formStyle = { display: "flex", flexDirection: "column", gap: "8px" };
 const inputStyle = {
-  padding: "8px 12px",
-  borderRadius: "6px",
+  padding: "8px",
+  borderRadius: "4px",
   border: "1px solid #334155",
   background: "#1e293b",
   color: "#fff",
-  fontSize: "13px",
-  outline: "none",
+  fontSize: "12px",
 };
 const btnStyle = {
-  padding: "10px",
-  borderRadius: "6px",
+  padding: "8px",
+  borderRadius: "4px",
   border: "none",
   background: "#0284c7",
   color: "#fff",
   fontWeight: "bold",
-  fontSize: "13px",
+  fontSize: "12px",
   cursor: "pointer",
-  marginTop: "5px",
 };
-const errorStyle = {
-  color: "#f87171",
+const btnBackStyle = {
+  padding: "6px",
+  borderRadius: "4px",
+  border: "1px solid #334155",
+  background: "transparent",
+  color: "#64748b",
   fontSize: "11px",
-  margin: "0",
-  textAlign: "left",
+  cursor: "pointer",
+  marginTop: "4px",
 };
-const keyboardBtnStyle = {
+const btnLogoutStyle = {
+  padding: "6px",
+  borderRadius: "4px",
+  border: "none",
+  background: "#334155",
+  color: "#f87171",
+  fontWeight: "bold",
+  fontSize: "11px",
+  cursor: "pointer",
+  width: "100%",
+};
+const errorStyle = { color: "#f87171", fontSize: "10px", margin: "0" };
+const numBtnStyle = {
   background: "#1e293b",
   color: "#fff",
   border: "none",
-  padding: "12px",
-  borderRadius: "6px",
-  fontSize: "14px",
+  padding: "10px",
+  borderRadius: "4px",
+  fontSize: "12px",
   fontWeight: "bold",
   cursor: "pointer",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
 };
 
 export default App;

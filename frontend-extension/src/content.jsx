@@ -43,7 +43,7 @@ async function escanearPantalla() {
       });
       const data = await response.json();
       if (data.isThreat && data.score >= 60) {
-        inyectarCortinaBloqueo(data.threatType, data.reason);
+        inyectarCortinaBloqueo(data.threatType, data.reason, urlActual);
       }
     } catch (err) {
       console.error("Error en módulo Vigilante AI:", err);
@@ -57,7 +57,7 @@ function iniciarObservador() {
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
-function inyectarCortinaBloqueo(tipo, motivo) {
+function inyectarCortinaBloqueo(tipo, motivo, urlActual) {
   if (document.getElementById("vigilante-overlay")) return;
 
   const overlay = document.createElement("div");
@@ -88,16 +88,35 @@ function inyectarCortinaBloqueo(tipo, motivo) {
       <p style="text-align: left; color: #94a3b8; font-size: 14px; line-height: 1.5; margin: 15px 0;">
         <strong>Análisis Forense de IA:</strong> ${motivo}
       </p>
-      <button id="btn-salir" style="background: #ef4444; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: bold; cursor: pointer; margin-top: 10px; width: 100%;">
-        Salir de este sitio de forma segura
-      </button>
+      <div style="display: flex; gap: 10px; width: 100%;">
+        <button id="btn-salir" style="background: #ef4444; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: bold; cursor: pointer; flex: 1;">
+          Salir seguro
+        </button>
+        <button id="btn-ignorar-escudo" style="background: transparent; color: #94a3b8; border: 1px solid #334155; padding: 10px 20px; border-radius: 6px; cursor: pointer; flex: 1; font-size: 12px;">
+          Ignorar advertencia
+        </button>
+      </div>
     </div>
   `;
   document.body.appendChild(overlay);
-  document.getElementById("btn-salir").onclick = () =>
-    (window.location.href = "https://google.com");
+
+  document.getElementById("btn-salir").onclick = () => {
+    window.location.href = "https://google.com";
+  };
+
+  document.getElementById("btn-ignorar-escudo").onclick = () => {
+    // LE AVISAMOS AL BACKEND: El usuario ignoró la alerta, actualizamos el historial en SQLite
+    fetch("http://localhost:5000/api/history/update-action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: urlActual }),
+    }).catch((err) =>
+      console.error("Error actualizando acción en historial:", err),
+    );
+
+    overlay.remove(); // Quitamos la cortina
+  };
 }
 
 iniciarObservador();
-
 console.log("🛡️ [Vigilante AI] ¡Código inyectado con éxito en esta pestaña!");
