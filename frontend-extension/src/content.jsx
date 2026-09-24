@@ -99,3 +99,5 @@ function inyectarCortinaBloqueo(tipo, motivo) {
 }
 
 iniciarObservador();
+
+console.log("🛡️ [Vigilante AI] ¡Código inyectado con éxito en esta pestaña!");
