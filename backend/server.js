@@ -1,5 +1,5 @@
 import dotenv from "dotenv";
-// Forzamos a dotenv a leer las variables en la línea número 1
+
 dotenv.config();
 
 import express from "express";
@@ -24,8 +24,6 @@ const ai = process.env.GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
   : null;
 
-// 🛡️ CONSULTA A GOOGLE SAFE BROWSING (fuente autoritativa de amenazas conocidas)
-// Devuelve el tipo de amenaza si la URL está en la base de datos de Google, o null si está limpia.
 async function checkSafeBrowsing(url) {
   if (!process.env.SAFE_BROWSING_API_KEY) return null; // no configurada, se salta este paso
 
@@ -63,8 +61,6 @@ async function checkSafeBrowsing(url) {
   }
 }
 
-// 🛡️ CONSULTA A VIRUSTOTAL (segunda opinión: +70 motores antivirus/reputación)
-// Devuelve una descripción de la amenaza si varios motores la marcan, o null si está limpia o aún no la conocen.
 async function checkVirusTotal(url) {
   if (!process.env.VIRUSTOTAL_API_KEY) return null; // no configurada, se salta este paso
 
@@ -110,9 +106,6 @@ async function checkVirusTotal(url) {
   }
 }
 
-// 🕸️ RED DE RESPALDO LOCAL: las mismas frases gatillo que usa content.jsx para decidir escanear.
-// Se usa solo como último recurso si Safe Browsing, VirusTotal y Gemini no pudieron confirmar nada
-// (esto es clave para archivos locales file://, que las APIs externas nunca pueden evaluar).
 const FRASES_FRAUDE_INEQUIVOCAS = [
   "suspension",
   "bloqueo",
@@ -136,7 +129,6 @@ function checkHeuristicaLocal(textContent) {
   return frase || null;
 }
 
-// 🤖 CONSULTA A GEMINI CON REINTENTOS AUTOMÁTICOS (por si el modelo está saturado, error 503)
 async function analizarConGemini(currentUrl, textContent) {
   const prompt = `Analiza si la URL y el texto presentan phishing o fraude REAL. No confundas con contenido normal de redes sociales, publicidad o e-commerce legítimo (ej: promociones, "envío gratis", notificaciones de la propia plataforma). Solo marca isThreat=true si hay indicios claros de engaño (suplantación de identidad, solicitud urgente de datos/dinero, dominio sospechoso, etc). URL: ${currentUrl} Texto: "${textContent}"`;
 
@@ -273,7 +265,7 @@ app.post("/api/auth/register", async (req, res) => {
 
     await resend.emails.send({
       from: "Vigilante Digital <onboarding@resend.dev>",
-      to: email, // Recuerda ingresar exactamente tu mismo email de registro de Resend
+      to: email,
       subject: "🔑 Activa tu Escudo - Código de Verificación",
       html: `
         <div style="font-family: sans-serif; padding: 20px; color: #1e293b;">
