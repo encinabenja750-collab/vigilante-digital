@@ -110,6 +110,80 @@ async function checkVirusTotal(url) {
   }
 }
 
+// 🕸️ RED DE RESPALDO LOCAL: las mismas frases gatillo que usa content.jsx para decidir escanear.
+// Se usa solo como último recurso si Safe Browsing, VirusTotal y Gemini no pudieron confirmar nada
+// (esto es clave para archivos locales file://, que las APIs externas nunca pueden evaluar).
+const FRASES_FRAUDE_INEQUIVOCAS = [
+  "suspension",
+  "bloqueo",
+  "urgente",
+  "verificar cuenta",
+  "actualizar pago",
+  "iniciar sesion",
+  "premio",
+  "ganaste",
+  "litecoin gratis",
+  "duplica tus criptos",
+  "deposito minimo",
+  "ingresa tus datos",
+  "token expirado",
+  "alerta de seguridad",
+];
+
+function checkHeuristicaLocal(textContent) {
+  const texto = (textContent || "").toLowerCase();
+  const frase = FRASES_FRAUDE_INEQUIVOCAS.find((f) => texto.includes(f));
+  return frase || null;
+}
+
+// 🤖 CONSULTA A GEMINI CON REINTENTOS AUTOMÁTICOS (por si el modelo está saturado, error 503)
+async function analizarConGemini(currentUrl, textContent) {
+  const prompt = `Analiza si la URL y el texto presentan phishing o fraude REAL. No confundas con contenido normal de redes sociales, publicidad o e-commerce legítimo (ej: promociones, "envío gratis", notificaciones de la propia plataforma). Solo marca isThreat=true si hay indicios claros de engaño (suplantación de identidad, solicitud urgente de datos/dinero, dominio sospechoso, etc). URL: ${currentUrl} Texto: "${textContent}"`;
+
+  const intentarLlamada = () =>
+    ai.models.generateContent({
+      model: "gemini-3.8-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            isThreat: { type: Type.BOOLEAN },
+            score: { type: Type.INTEGER },
+            threatType: { type: Type.STRING },
+            reason: { type: Type.STRING },
+          },
+          required: ["isThreat", "score", "threatType", "reason"],
+        },
+      },
+    });
+
+  const esperas = [800]; // 1 solo reintento corto: priorizamos velocidad sobre insistencia
+  let ultimoError;
+
+  for (let intento = 0; intento <= esperas.length; intento++) {
+    try {
+      const response = await intentarLlamada();
+      return JSON.parse(response.text);
+    } catch (error) {
+      ultimoError = error;
+      const saturado =
+        error?.error?.code === 503 ||
+        /UNAVAILABLE|high demand/i.test(error?.message || "");
+
+      if (!saturado || intento === esperas.length) throw error; // no reintentamos si no es saturación, o si ya se acabaron los intentos
+
+      console.log(
+        `⏳ Gemini saturado (503), reintentando en ${esperas[intento] / 1000}s... (intento ${intento + 1}/${esperas.length})`,
+      );
+      await new Promise((r) => setTimeout(r, esperas[intento]));
+    }
+  }
+
+  throw ultimoError;
+}
+
 // Inicialización estricta de Resend con la variable de entorno ya cargada
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -286,26 +360,12 @@ app.post("/api/analyze", async (req, res) => {
     // 2. Si ninguna de las dos encontró nada, analizamos el contexto del texto con Gemini
     if (ai && process.env.GEMINI_API_KEY) {
       try {
-        const prompt = `Analiza si la URL y el texto presentan phishing o fraude REAL. No confundas con contenido normal de redes sociales, publicidad o e-commerce legítimo (ej: promociones, "envío gratis", notificaciones de la propia plataforma). Solo marca isThreat=true si hay indicios claros de engaño (suplantación de identidad, solicitud urgente de datos/dinero, dominio sospechoso, etc). URL: ${currentUrl} Texto: "${textContent}"`;
-        const response = await ai.models.generateContent({
-          model: "gemini-3.8-flash",
-          contents: prompt,
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                isThreat: { type: Type.BOOLEAN },
-                score: { type: Type.INTEGER },
-                threatType: { type: Type.STRING },
-                reason: { type: Type.STRING },
-              },
-              required: ["isThreat", "score", "threatType", "reason"],
-            },
-          },
-        });
-
-        const securityReport = JSON.parse(response.text);
+        const securityReport = await Promise.race([
+          analizarConGemini(currentUrl, textContent),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("TIMEOUT_GEMINI")), 4000),
+          ),
+        ]);
 
         if (securityReport.isThreat && securityReport.score >= 60) {
           await db.run(
@@ -324,11 +384,36 @@ app.post("/api/analyze", async (req, res) => {
         console.error(
           "❌ Fallo controlado en Gemini API:",
           geminiError.message,
+          geminiError.cause ? `| causa: ${geminiError.cause}` : "",
         );
       }
     }
 
-    // 3. Sin coincidencias en Safe Browsing y sin respuesta válida de Gemini: NO se marca como amenaza.
+    // 3. Última red: si ninguna fuente externa pudo confirmar nada (o Gemini falló),
+    // buscamos frases de fraude inequívocas en el propio texto de la página.
+    const fraseFraude = checkHeuristicaLocal(textContent);
+    if (fraseFraude) {
+      console.log(
+        `⚠️ [Heurística local] Frase de fraude detectada: "${fraseFraude}"`,
+      );
+      const reporte = {
+        isThreat: true,
+        score: 90,
+        threatType: "Estafa Financiera / Esquema Ponzi",
+        reason: `Se detectó la frase de fraude conocida "${fraseFraude}" en el contenido de la página.`,
+      };
+      try {
+        await db.run(
+          `INSERT INTO historial (url, threat_type, reason, fecha, action) VALUES (?, ?, ?, ?, 'Bloqueado')`,
+          [currentUrl, reporte.threatType, reporte.reason, fechaActual],
+        );
+      } catch (dbErr) {
+        console.error("Error guardando historial en SQLite:", dbErr);
+      }
+      return res.json(reporte);
+    }
+
+    // 4. Sin coincidencias en ninguna capa: NO se marca como amenaza.
     // (Antes esto forzaba isThreat:true "por las dudas" — eso era la causa de los falsos positivos)
     return res.json({
       isThreat: false,
