@@ -62,12 +62,16 @@ async function ejecutarEscaneoForense() {
             data["reason"] ||
             "Solicitud de depósito de capital urgente condicionada a la liberación de falsos fondos.";
 
-          console.log(
-            "📊 [Vigilante AI] Datos forenses validados en línea 47. Gatillando contención...",
-          );
-
-          // BLINDAJE DEMO: Forzamos la inyección visual para que el cartel estalle SÍ O SÍ en la presentación
-          inyectarBloqueoVisual(tipoAtk, motivoIa, urlActual);
+          if (esAmenaza) {
+            console.log(
+              "📊 [Vigilante AI] Amenaza confirmada. Gatillando contención...",
+            );
+            inyectarBloqueoVisual(tipoAtk, motivoIa, urlActual);
+          } else {
+            console.log(
+              "✅ [Vigilante AI] Sin amenazas detectadas en esta página.",
+            );
+          }
         } else {
           console.error(
             "❌ Fallo en la respuesta del Service Worker:",

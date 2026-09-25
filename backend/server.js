@@ -24,6 +24,92 @@ const ai = process.env.GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
   : null;
 
+// 🛡️ CONSULTA A GOOGLE SAFE BROWSING (fuente autoritativa de amenazas conocidas)
+// Devuelve el tipo de amenaza si la URL está en la base de datos de Google, o null si está limpia.
+async function checkSafeBrowsing(url) {
+  if (!process.env.SAFE_BROWSING_API_KEY) return null; // no configurada, se salta este paso
+
+  try {
+    const respuesta = await fetch(
+      `https://safebrowsing.googleapis.com/v4/threatMatches:find?key=${process.env.SAFE_BROWSING_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client: { clientId: "vigilante-digital", clientVersion: "1.0.0" },
+          threatInfo: {
+            threatTypes: [
+              "MALWARE",
+              "SOCIAL_ENGINEERING",
+              "UNWANTED_SOFTWARE",
+              "POTENTIALLY_HARMFUL_APPLICATION",
+            ],
+            platformTypes: ["ANY_PLATFORM"],
+            threatEntryTypes: ["URL"],
+            threatEntries: [{ url }],
+          },
+        }),
+      },
+    );
+
+    const data = await respuesta.json();
+    if (data.matches && data.matches.length > 0) {
+      return data.matches[0].threatType; // ej: "SOCIAL_ENGINEERING"
+    }
+    return null; // Google no encontró coincidencias: URL limpia
+  } catch (err) {
+    console.error("⚠️ Error consultando Safe Browsing:", err.message);
+    return null; // si la API falla, no bloqueamos por las dudas
+  }
+}
+
+// 🛡️ CONSULTA A VIRUSTOTAL (segunda opinión: +70 motores antivirus/reputación)
+// Devuelve una descripción de la amenaza si varios motores la marcan, o null si está limpia o aún no la conocen.
+async function checkVirusTotal(url) {
+  if (!process.env.VIRUSTOTAL_API_KEY) return null; // no configurada, se salta este paso
+
+  try {
+    // VirusTotal identifica cada URL por su versión en base64 sin el padding "="
+    const urlId = Buffer.from(url).toString("base64").replace(/=+$/, "");
+
+    const respuesta = await fetch(
+      `https://www.virustotal.com/api/v3/urls/${urlId}`,
+      { headers: { "x-apikey": process.env.VIRUSTOTAL_API_KEY } },
+    );
+
+    if (respuesta.status === 404) {
+      // VirusTotal todavía no analizó esta URL: la mandamos a analizar para la próxima vez
+      // (no esperamos el resultado para no frenar al usuario ahora)
+      fetch("https://www.virustotal.com/api/v3/urls", {
+        method: "POST",
+        headers: {
+          "x-apikey": process.env.VIRUSTOTAL_API_KEY,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: `url=${encodeURIComponent(url)}`,
+      }).catch(() => {});
+      return null;
+    }
+
+    if (!respuesta.ok) return null;
+
+    const data = await respuesta.json();
+    const stats = data?.data?.attributes?.last_analysis_stats;
+    if (!stats) return null;
+
+    const detecciones = (stats.malicious || 0) + (stats.suspicious || 0);
+
+    // Exigimos al menos 3 motores en coincidencia para evitar falsos positivos de un solo motor
+    if (detecciones >= 3) {
+      return `${detecciones} motores antivirus marcaron esta URL como maliciosa`;
+    }
+    return null;
+  } catch (err) {
+    console.error("⚠️ Error consultando VirusTotal:", err.message);
+    return null;
+  }
+}
+
 // Inicialización estricta de Resend con la variable de entorno ya cargada
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -164,54 +250,45 @@ app.post("/api/auth/verify", async (req, res) => {
 // 🕵️‍♂️ ENDPOINT: ANALIZADOR COMPACTO BLINDADO CONTRA MINIFICACIÓN
 // 🕵️‍♂️ ENDPOINT: ANALIZADOR FORENSE INDESTRUCTIBLE PARA LA DEMO
 app.post("/api/analyze", async (req, res) => {
-  // Try/Catch supremo: Garantiza que el puerto 5000 NUNCA devuelva un error 500 ni se caiga
   try {
     const { textContent, currentUrl } = req.body;
     const fechaActual = new Date().toLocaleString();
-    const textoMin = textContent ? textContent.toLowerCase() : "";
 
-    console.log(
-      `\n🔍 [Auditoría Forense] Analizando tráfico entrante de: ${currentUrl}`,
-    );
+    console.log(`\n🔍 [Auditoría Forense] Analizando: ${currentUrl}`);
 
-    // 1. FILTRO HEURÍSTICO LOCAL DE RESPALDO (Garantiza la respuesta exitosa en la demo)
-    if (
-      textoMin.includes("alerta") ||
-      textoMin.includes("deposito") ||
-      textoMin.includes("litecoin") ||
-      textoMin.includes("gratis")
-    ) {
-      console.log(
-        "⚠️ [Filtro Heurístico] Estafa confirmada localmente. Grabando en SQLite...",
-      );
+    // 1. GOOGLE SAFE BROWSING + VIRUSTOTAL EN PARALELO (fuentes autoritativas de reputación de URLs)
+    const [threatSafeBrowsing, threatVirusTotal] = await Promise.all([
+      checkSafeBrowsing(currentUrl),
+      checkVirusTotal(currentUrl),
+    ]);
 
-      // Registramos el incidente en la base de datos relacional de SQLite usando SQL
+    if (threatSafeBrowsing || threatVirusTotal) {
+      const fuente = threatSafeBrowsing ? "Google Safe Browsing" : "VirusTotal";
+      const detalle = threatSafeBrowsing || threatVirusTotal;
+      console.log(`⚠️ [${fuente}] URL marcada: ${detalle}`);
+      const reporte = {
+        isThreat: true,
+        score: 99,
+        threatType: threatSafeBrowsing || "Reputación Maliciosa",
+        reason: `${fuente} identificó esta URL como una amenaza conocida (${detalle}).`,
+      };
       try {
         await db.run(
-          `INSERT INTO historial (url, threat_type, reason, fecha, action) 
-           VALUES (?, 'Estafa Financiera / Esquema Ponzi', 'Se detectó una solicitud de depósito urgente ligada a una falsa liberación de fondos cripto.', ?, 'Bloqueado')`,
-          [currentUrl, fechaActual],
+          `INSERT INTO historial (url, threat_type, reason, fecha, action) VALUES (?, ?, ?, ?, 'Bloqueado')`,
+          [currentUrl, reporte.threatType, reporte.reason, fechaActual],
         );
       } catch (dbErr) {
-        console.error("Error guardando historial local en SQLite:", dbErr);
+        console.error("Error guardando historial en SQLite:", dbErr);
       }
-
-      // Respondemos SÍ O SÍ un JSON estructurado perfecto y exitoso
-      return res.json({
-        isThreat: true,
-        score: 98,
-        threatType: "Estafa Financiera / Esquema Ponzi",
-        reason:
-          "El sistema forense automatizado detectó una propuesta económica fraudulenta en el texto visible que condiciona la entrega de ganancias a cambio de un depósito de capital urgente.",
-      });
+      return res.json(reporte);
     }
 
-    // 2. CONEXIÓN CON GEMINI (Aislada por si la API key o internet fluctúan en el evento)
-    if (ai && process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "") {
+    // 2. Si ninguna de las dos encontró nada, analizamos el contexto del texto con Gemini
+    if (ai && process.env.GEMINI_API_KEY) {
       try {
-        const prompt = `Analiza si la URL y el texto presentan phishing o fraude. URL: ${currentUrl} Texto: "${textContent}"`;
+        const prompt = `Analiza si la URL y el texto presentan phishing o fraude REAL. No confundas con contenido normal de redes sociales, publicidad o e-commerce legítimo (ej: promociones, "envío gratis", notificaciones de la propia plataforma). Solo marca isThreat=true si hay indicios claros de engaño (suplantación de identidad, solicitud urgente de datos/dinero, dominio sospechoso, etc). URL: ${currentUrl} Texto: "${textContent}"`;
         const response = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: "gemini-3.8-flash",
           contents: prompt,
           config: {
             responseMimeType: "application/json",
@@ -245,32 +322,27 @@ app.post("/api/analyze", async (req, res) => {
         return res.json(securityReport);
       } catch (geminiError) {
         console.error(
-          "❌ Fallo controlado en Gemini API, activando contingencia de red:",
-          geminiError,
+          "❌ Fallo controlado en Gemini API:",
+          geminiError.message,
         );
       }
     }
 
-    // Reporte preventivo si el servidor se confunde para que Chrome nunca tire error
+    // 3. Sin coincidencias en Safe Browsing y sin respuesta válida de Gemini: NO se marca como amenaza.
+    // (Antes esto forzaba isThreat:true "por las dudas" — eso era la causa de los falsos positivos)
     return res.json({
-      isThreat: true,
-      score: 85,
-      threatType: "Sospecha de Phishing / Alerta Preventiva",
-      reason:
-        "El algoritmo forense detectó patrones de manipulación psicológica compatibles con fraudes de identidad.",
+      isThreat: false,
+      score: 0,
+      threatType: "Ninguna",
+      reason: "No se detectaron indicios de phishing o fraude en esta página.",
     });
   } catch (fatalError) {
-    console.error(
-      "💥 Error crítico fatal salvado en el Servidor Express:",
-      fatalError,
-    );
-    // Aunque todo explote, obligamos a Express a devolver un estado 200 con JSON válido
+    console.error("💥 Error crítico en el servidor:", fatalError);
     return res.json({
-      isThreat: true,
-      score: 95,
-      threatType: "Contención Forense de Emergencia",
-      reason:
-        "Capa de protección proactiva activada ante anomalías estructurales severas en la pestaña.",
+      isThreat: false,
+      score: 0,
+      threatType: "Error",
+      reason: "Ocurrió un error al analizar. No se bloqueó por precaución.",
     });
   }
 });

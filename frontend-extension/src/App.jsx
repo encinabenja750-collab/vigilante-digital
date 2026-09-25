@@ -280,6 +280,20 @@ function App() {
                 ? "Registrar Cuenta"
                 : "Ingresar al Escudo"}
           </button>
+          <button
+            type="button"
+            onClick={() => {
+              setError("");
+              setPin("");
+              setConfirmPin("");
+              setIsRegistering(!isRegistering);
+            }}
+            style={btnBackStyle}
+          >
+            {isRegistering
+              ? "¿Ya tenés cuenta? Iniciar sesión"
+              : "¿No tenés cuenta? Regístrate"}
+          </button>
         </form>
       </div>
     );
@@ -559,17 +573,14 @@ function App() {
 // ==================== ENTORNO DE ESTILOS DUAL ADAPTATIVO (POPUP + PESTAÑA) ====================
 const containerStyle = {
   width: "100%",
-  maxWidth: "300px",
   minHeight: "400px",
   padding: "20px 16px",
   fontFamily: "system-ui, -apple-system, sans-serif",
   background: "#0f172a",
   color: "#ffffff",
-  borderRadius: "12px",
   boxSizing: "border-box",
   textAlign: "center",
-  boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.5)",
-  margin: "4vh auto",
+  margin: 0,
   display: "flex",
   flexDirection: "column",
   justifyContent: "center",
