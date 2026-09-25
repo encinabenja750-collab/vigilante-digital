@@ -17,9 +17,10 @@ function App() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [shieldActive, setShieldActive] = useState(true);
-  const [historyList, setHistoryList] = useState([]); // Guarda el historial de SQLite
+  const [historyList, setHistoryList] = useState([]);
+  const [isRegistering, setIsRegistering] = useState(true);
 
-  // Escucha el inicio de la extensión en Chrome
+  // 🔄 ARRANQUE INTELIGENTE: Recupera el estado exacto pase lo que pase al cerrar la ventana
   useEffect(() => {
     if (
       typeof chrome !== "undefined" &&
@@ -27,22 +28,26 @@ function App() {
       chrome.storage.local
     ) {
       chrome.storage.local.get(
-        ["userEmail", "isVerified", "currentStep"],
+        ["userEmail", "isVerified", "currentStep", "haTenidoCuenta"],
         (result) => {
           if (result.userEmail) {
             setEmail(result.userEmail);
+
             if (result.isVerified) {
-              setStep(STEPS.LOCK);
+              setStep(STEPS.LOCK); // Si ya inició sesión, pide PIN diario
             } else if (result.currentStep === STEPS.VERIFY) {
-              setStep(STEPS.VERIFY);
+              setStep(STEPS.VERIFY); // ¡BLINDAJE!: Si cerró la pestaña esperando el código, se queda acá
             }
+          } else if (result.haTenidoCuenta) {
+            setIsRegistering(false); // Si cerró sesión, muestra login automático
+            setStep(STEPS.REGISTER);
           }
         },
       );
     }
   }, []);
 
-  // Consulta el historial en la base de datos relacional
+  // 🗄️ Carga el historial desde la base de datos SQLite
   const cargarHistorial = async () => {
     try {
       const res = await fetch("http://localhost:5000/api/history");
@@ -55,21 +60,22 @@ function App() {
     }
   };
 
-  // Trae los datos dinámicos cuando entramos al panel
   useEffect(() => {
     if (step === STEPS.DASHBOARD) {
       cargarHistorial();
     }
   }, [step]);
 
-  // ✉️ MANEJADOR DE REGISTRO
+  // ✉️ MANEJADOR DE REGISTRO (Guarda el paso temporal de verificación)
   const handleRegister = async (e) => {
     e.preventDefault();
     setError("");
+
     if (!email.includes("@")) return setError("Introduce un correo válido.");
     if (pin.length !== 4 || isNaN(pin))
-      return setError("PIN debe ser de 4 números.");
-    if (pin !== confirmPin) return setError("Los PINes no coinciden.");
+      return setError("El PIN debe ser de 4 números.");
+    if (pin !== confirmPin)
+      return setError("Los PINes ingresados no coinciden.");
 
     setLoading(true);
     try {
@@ -78,7 +84,9 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, pin }),
       });
+
       if (response.ok) {
+        // Guardamos inmediatamente el paso para blindar el Popup contra clics afuera
         if (
           typeof chrome !== "undefined" &&
           chrome.storage &&
@@ -95,26 +103,26 @@ function App() {
         setError(data.error || "Error en el registro.");
       }
     } catch (err) {
-      setError("Error conectando con el servidor.");
+      setError("No se pudo conectar con el servidor.");
     } finally {
       setLoading(false);
     }
   };
 
-  // 🔑 MANEJADOR DE VERIFICACIÓN OTP
-  const handleVerify = async (e) => {
+  // 🔑 MANEJADOR DE INICIO DE SESIÓN (LOGIN AUTOMÁTICO)
+  const handleLogin = async (e) => {
     e.preventDefault();
     setError("");
-    if (otpCode.length !== 6 || isNaN(otpCode))
-      return setError("Debe ser de 6 números.");
-
     setLoading(true);
+
     try {
-      const response = await fetch("http://localhost:5000/api/auth/verify", {
+      const response = await fetch("http://localhost:5000/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, code: otpCode }),
+        body: JSON.stringify({ email, pin }),
       });
+      const data = await response.json();
+
       if (response.ok) {
         if (
           typeof chrome !== "undefined" &&
@@ -129,17 +137,58 @@ function App() {
         }
         setStep(STEPS.DASHBOARD);
       } else {
-        const data = await response.json();
-        setError(data.error || "Código incorrecto.");
+        if (response.status === 403 && data.requiereVerificacion) {
+          setStep(STEPS.VERIFY);
+        } else {
+          setError(data.error || "Credenciales incorrectas.");
+        }
       }
     } catch (err) {
-      setError("Error al validar código.");
+      setError("No se pudo conectar con el servidor.");
     } finally {
       setLoading(false);
     }
   };
 
-  // 🔒 MANEJADOR DE LOGIN POR PIN DIARIO
+  // 🔢 MANEJADOR DE VERIFICACIÓN DE CÓDIGO (OTP)
+  const handleVerify = async (e) => {
+    e.preventDefault();
+    setError("");
+    if (otpCode.length !== 6 || isNaN(otpCode))
+      return setError("El código debe ser de 6 números.");
+
+    setLoading(true);
+    try {
+      const response = await fetch("http://localhost:5000/api/auth/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, code: otpCode }),
+      });
+
+      if (response.ok) {
+        if (
+          typeof chrome !== "undefined" &&
+          chrome.storage &&
+          chrome.storage.local
+        ) {
+          chrome.storage.local.set({
+            userEmail: email,
+            isVerified: true,
+            currentStep: STEPS.DASHBOARD,
+          });
+        }
+        setStep(STEPS.DASHBOARD);
+      } else {
+        setError("Código incorrecto o vencido.");
+      }
+    } catch (err) {
+      setError("Error al validar el código.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 🔒 MANEJADOR DE TECLADO NUMÉRICO DIARIO
   const handleLoginPin = (num) => {
     setError(false);
     if (loginPin.length < 4) {
@@ -154,7 +203,7 @@ function App() {
     }
   };
 
-  // 🚪 FUNCIÓN PARA CERRAR SESIÓN (LIMPIEZA DE MEMORIA REAL)
+  // 🚪 MANEJADOR DE CERRAR SESIÓN INTELIGENTE
   const handleLogout = () => {
     if (
       typeof chrome !== "undefined" &&
@@ -162,27 +211,39 @@ function App() {
       chrome.storage.local
     ) {
       chrome.storage.local.clear(() => {
+        chrome.storage.local.set({ haTenidoCuenta: true });
         setEmail("");
         setPin("");
         setConfirmPin("");
         setOtpCode("");
         setLoginPin("");
+        setIsRegistering(false);
         setStep(STEPS.REGISTER);
       });
     } else {
+      setIsRegistering(false);
       setStep(STEPS.REGISTER);
     }
   };
 
   // ==================== INTERFACES VISUALES RENDERIZADAS ====================
 
-  // VISTA A: FORMULARIO DE REGISTRO
+  // VISTA A: FORMULARIO AUTOMÁTICO (MUTANTE ENTRE REGISTRO O LOGIN)
   if (step === STEPS.REGISTER) {
     return (
       <div style={containerStyle}>
-        <h2 style={titleStyle}>🛡️ Registro de Escudo</h2>
-        <p style={subtitleStyle}>Activa el Vigilante AI en tu navegador.</p>
-        <form onSubmit={handleRegister} style={formStyle}>
+        <h2 style={titleStyle}>
+          {isRegistering ? "🛡️ Registro de Escudo" : "🔑 Iniciar Sesión"}
+        </h2>
+        <p style={subtitleStyle}>
+          {isRegistering
+            ? "Crea tu cuenta para activar el Vigilante AI."
+            : "Coloca tus credenciales para reanudar el escudo."}
+        </p>
+        <form
+          onSubmit={isRegistering ? handleRegister : handleLogin}
+          style={formStyle}
+        >
           <input
             type="email"
             placeholder="Tu Gmail"
@@ -200,33 +261,39 @@ function App() {
             required
             style={inputStyle}
           />
-          <input
-            type="password"
-            maxLength={4}
-            placeholder="Confirma tu PIN"
-            value={confirmPin}
-            onChange={(e) => setConfirmPin(e.target.value)}
-            required
-            style={inputStyle}
-          />
+          {isRegistering && (
+            <input
+              type="password"
+              maxLength={4}
+              placeholder="Confirma tu PIN"
+              value={confirmPin}
+              onChange={(e) => setConfirmPin(e.target.value)}
+              required
+              style={inputStyle}
+            />
+          )}
           {error && <p style={errorStyle}>{error}</p>}
           <button type="submit" disabled={loading} style={btnStyle}>
-            {loading ? "Procesando..." : "Registrar Cuenta"}
+            {loading
+              ? "Procesando..."
+              : isRegistering
+                ? "Registrar Cuenta"
+                : "Ingresar al Escudo"}
           </button>
         </form>
       </div>
     );
   }
 
-  // VISTA B: PANTALLA DE VERIFICACIÓN DE GMAIL (OTP) -> ¡BOTÓN VOLVER ATRÁS INCLUIDO!
+  // VISTA B: PANTALLA DE VERIFICACIÓN DE GMAIL (OTP) -> ¡BLINDADA Y CON BOTÓN ATRÁS!
   if (step === STEPS.VERIFY) {
     return (
       <div style={containerStyle}>
         <div style={{ fontSize: "24px" }}>✉️</div>
         <h2 style={titleStyle}>Verifica tu Correo</h2>
         <p style={subtitleStyle}>
-          Ingresa el código de tu terminal de Node para <strong>{email}</strong>
-          .
+          Ingresa el código que figura en tu terminal de Node para{" "}
+          <strong>{email}</strong>.
         </p>
         <form onSubmit={handleVerify} style={formStyle}>
           <input
@@ -327,7 +394,7 @@ function App() {
     );
   }
 
-  // VISTA D: DASHBOARD PRINCIPAL CON HISTORIAL DINÁMICO DE SQLITE
+  // VISTA D: DASHBOARD PRINCIPAL CON EL HISTORIAL Y LOGOUT REMOTO
   return (
     <div style={containerStyle}>
       <div
@@ -375,7 +442,7 @@ function App() {
         </strong>
       </div>
 
-      {/* RENDERIZADO DEL HISTORIAL DE AMENAZAS */}
+      {/* RECUADRO DEL HISTORIAL DINÁMICO */}
       <div
         style={{
           background: "#1e293b",
@@ -489,15 +556,23 @@ function App() {
   );
 }
 
-// ==================== OBJETOS DE ESTILO CONSERVA EL TAMAÑO COMPACTO INICIAL ====================
+// ==================== ENTORNO DE ESTILOS DUAL ADAPTATIVO (POPUP + PESTAÑA) ====================
 const containerStyle = {
-  width: "280px",
-  padding: "15px",
-  fontFamily: "system-ui, sans-serif",
+  width: "100%",
+  maxWidth: "300px",
+  minHeight: "400px",
+  padding: "20px 16px",
+  fontFamily: "system-ui, -apple-system, sans-serif",
   background: "#0f172a",
   color: "#ffffff",
-  borderRadius: "8px",
+  borderRadius: "12px",
   boxSizing: "border-box",
+  textAlign: "center",
+  boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.5)",
+  margin: "4vh auto",
+  display: "flex",
+  flexDirection: "column",
+  justifyContent: "center",
 };
 const titleStyle = { margin: "2px 0", fontSize: "14px", fontWeight: "bold" };
 const subtitleStyle = {
